@@ -72,7 +72,7 @@ class EKF():
         self.P = np.eye(self.mu_n)*10E2
         self.P_history = [np.trace(self.P)]
 
-        if odom_file != None:
+        if odom_file != None and 'pr [m]' in self.sat_df.columns:
             t0 = self.sat_df['seconds of week [s]'].to_numpy()[0]
             x_calc = [x0,y0,z0]
             bu_calc = 0.0
@@ -162,7 +162,7 @@ class EKF():
             bu: new clock bias
         """
         numSats = len(sat_df)
-        dist = np.zeros((numSats,1))
+        dist = np.zeros(numSats)
 
         G = np.zeros((numSats,4))
         W = np.eye(numSats)
@@ -174,15 +174,16 @@ class EKF():
             dist[ii] = np.sqrt((x_s-x_0[0])**2 + \
                                (y_s-x_0[1])**2 + \
                                (z_s-x_0[2])**2)
-            G[ii,:] = [-(x_s - x_0[0])/dist[ii],
-                       -(y_s - x_0[1])/dist[ii],
-                       -(z_s - x_0[2])/dist[ii],
+            dist_i = float(dist[ii])
+            G[ii,:] = [-(x_s - x_0[0])/dist_i,
+                       -(y_s - x_0[1])/dist_i,
+                       -(z_s - x_0[2])/dist_i,
                        1.0]
             W[ii,ii] *= 1./sat_df['Pr_sigma'].to_numpy()[ii]
 
         c = 299792458.0
         relativity = sat_df['idk wtf this is'].to_numpy().reshape(-1,1) * c # adjusting for relativity??
-        rho_0 = dist + bu - relativity
+        rho_0 = dist.reshape(-1,1) + bu - relativity
         rho_dif = sat_df['pr [m]'].to_numpy().reshape(-1,1) - rho_0
         # delta = np.linalg.inv(G.T.dot(G)).dot(G.T).dot(rho_dif)
         delta = np.linalg.pinv(W.dot(G)).dot(W).dot(rho_dif)
@@ -227,19 +228,28 @@ class EKF():
             Output(s):
                 none
         """
+        sat_x = np.asarray(sat_x).reshape(-1)
+        sat_y = np.asarray(sat_y).reshape(-1)
+        sat_z = np.asarray(sat_z).reshape(-1)
+        sigmas = np.asarray(sigmas).reshape(-1)
+        time_correction = np.asarray(time_correction).reshape(-1)
         num_sats = mes.shape[0]
         zt = mes
         H = np.zeros((num_sats,self.mu_n))
         h = np.zeros((num_sats,1))
         R = np.eye(num_sats)
+        mu_x = float(self.mu[0,0])
+        mu_y = float(self.mu[1,0])
+        mu_z = float(self.mu[2,0])
+        mu_b = float(self.mu[3,0])
         for ii in range(num_sats):
-            dist = np.sqrt((sat_x[ii]-self.mu[0])**2 + (sat_y[ii]-self.mu[1])**2 + (sat_z[ii]-self.mu[2])**2)
-            H[ii,0] = (self.mu[0]-sat_x[ii])/dist
-            H[ii,1] = (self.mu[1]-sat_y[ii])/dist
-            H[ii,2] = (self.mu[2]-sat_z[ii])/dist
+            dist = np.sqrt((sat_x[ii]-mu_x)**2 + (sat_y[ii]-mu_y)**2 + (sat_z[ii]-mu_z)**2)
+            H[ii,0] = (mu_x-sat_x[ii])/dist
+            H[ii,1] = (mu_y-sat_y[ii])/dist
+            H[ii,2] = (mu_z-sat_z[ii])/dist
             H[ii,3] = 1.0
             c = 299792458.0
-            h[ii] = dist + self.mu[3] - time_correction[ii] * c # adjusting for relativity??
+            h[ii] = dist + mu_b - time_correction[ii] * c # adjusting for relativity??
             R[ii,ii] *= sigmas[ii]**2
         yt = zt - h
 
@@ -397,7 +407,7 @@ class EKF():
         plt.ylabel("Latitude [deg]")
 
         fig = plt.figure()
-        ax = fig.gca(projection='3d')
+        ax = fig.add_subplot(projection='3d')
         ax.plot(lla_traj[:,1], lla_traj[:,0], lla_traj[:,2], label='our solution')
         if self.odom_file != None:
             lat_truth = self.odom_df['GPS(0):Lat[degrees]'].to_numpy()[self.truth_indexes]
