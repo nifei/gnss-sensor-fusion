@@ -67,6 +67,7 @@ class EKF():
         self.mu = np.array([[x0,y0,z0,0.0]]).T
         self.mu_n = self.mu.shape[0]
         self.mu_history = self.mu.copy()
+        self.run_df = None
 
         # initialize covariance matrix
         self.P = np.eye(self.mu_n)*10E2
@@ -302,9 +303,20 @@ class EKF():
         # setup progress bar
         print("running kalman filter, please wait...")
         bar = progress.bar.IncrementalBar('Progress:', max=len(self.times))
+        run_rows = []
 
 
         for tt, timestep in enumerate(self.times):
+            odom_vel_x = np.nan
+            odom_vel_y = np.nan
+            odom_vel_z = np.nan
+            used_odom_predict = False
+            used_gnss_update = False
+            gnss_obs_mode = "none"
+            gnss_lat = np.nan
+            gnss_lon = np.nan
+            gnss_alt = np.nan
+
             # predict step for odometry
             if self.odom_df['seconds of week [s]'].isin([timestep]).any():
                 dt_odom = timestep - t_odom_prev
@@ -318,6 +330,7 @@ class EKF():
                     odom_vel_y = odom_timestep['ECEF_vel_y'].values[0]
                     odom_vel_z = odom_timestep['ECEF_vel_z'].values[0]
                     self.predict_imu(np.array([[odom_vel_x,odom_vel_y,odom_vel_z]]).T,dt_odom)
+                    used_odom_predict = True
             # update gnss step
             if self.sat_df['seconds of week [s]'].isin([timestep]).any():
                 sat_timestep = self.sat_df[self.sat_df['seconds of week [s]'] == timestep]
@@ -329,15 +342,41 @@ class EKF():
                     sigmas = sat_timestep['Pr_sigma'].to_numpy().reshape(-1,1)
                     time_correction = sat_timestep['idk wtf this is'].to_numpy().reshape(-1,1)
                     self.update_gnss_raw(pranges,sat_x,sat_y,sat_z,sigmas,time_correction)
+                    used_gnss_update = True
+                    gnss_obs_mode = "raw_prange"
                 else:
                     lat_t = sat_timestep['Latitude'].to_numpy()[0]
                     lon_t = sat_timestep['Longitude'].to_numpy()[0]
                     alt_t = sat_timestep['Altitude'].to_numpy()[0]
                     self.update_gnss(lat_t,lon_t,alt_t)
+                    used_gnss_update = True
+                    gnss_obs_mode = "lla"
+                    gnss_lat = float(lat_t)
+                    gnss_lon = float(lon_t)
+                    gnss_alt = float(alt_t)
 
             # add values to history
             self.mu_history = np.hstack((self.mu_history,self.mu))
             self.P_history.append(np.trace(self.P))
+            run_rows.append(
+                {
+                    "seconds of week [s]": float(timestep),
+                    "used_odom_predict": int(used_odom_predict),
+                    "used_gnss_update": int(used_gnss_update),
+                    "gnss_obs_mode": gnss_obs_mode,
+                    "odom_ecef_vel_x_mps": float(odom_vel_x) if np.isfinite(odom_vel_x) else np.nan,
+                    "odom_ecef_vel_y_mps": float(odom_vel_y) if np.isfinite(odom_vel_y) else np.nan,
+                    "odom_ecef_vel_z_mps": float(odom_vel_z) if np.isfinite(odom_vel_z) else np.nan,
+                    "gnss_lat_deg": gnss_lat,
+                    "gnss_lon_deg": gnss_lon,
+                    "gnss_alt_m": gnss_alt,
+                    "x_ecef_m": float(self.mu[0,0]),
+                    "y_ecef_m": float(self.mu[1,0]),
+                    "z_ecef_m": float(self.mu[2,0]),
+                    "b_clock_m": float(self.mu[3,0]),
+                    "trace_P": float(np.trace(self.P)),
+                }
+            )
             bar.next() # progress bar
 
 
@@ -346,6 +385,20 @@ class EKF():
         if len(self.times) + 1 == self.mu_history.shape[1]:
             self.mu_history = self.mu_history[:,:-1]
             self.P_history = self.P_history[:-1]
+            run_rows = run_rows[:-1]
+        self.run_df = pd.DataFrame(run_rows)
+
+    def get_run_dataframe(self):
+        if self.run_df is None:
+            raise RuntimeError("run() must be called before get_run_dataframe().")
+        return self.run_df.copy()
+
+    def get_lla_trajectory(self, alt=np.array([None])):
+        if alt.all() == None:
+            lon, lat, alt = pyproj.transform(self.ecef, self.lla, self.mu_history[0,:], self.mu_history[1,:], self.mu_history[2,:], radians=False)
+        else:
+            lon, lat, reject = pyproj.transform(self.ecef, self.lla, self.mu_history[0,:], self.mu_history[1,:], self.mu_history[2,:], radians=False)
+        return np.asarray(lat), np.asarray(lon), np.asarray(alt)
 
     def plot(self,alt=np.array([None])):
         fig, ax = plt.subplots()
